@@ -1,0 +1,103 @@
+pipeline {
+    agent any
+
+    stages {
+        stage('Get Code') {
+            steps {
+                // Get some code from a GitHub repository
+                git 'https://github.com/santt3131/devops_caso1.1.git'
+              
+            }
+
+        }
+        
+        stage('Build') {
+            steps {
+                echo 'Eyyyyy, esto es Python. No hay que compilar nada!!!'
+                // Mantenemos WORKSPACE tal cual lo tenías
+                echo WORKSPACE
+                sh 'ls' 
+                //Window: bat 'dir'
+            }
+        }
+
+     
+
+        stage('Test'){
+            parallel{
+                stage('Unit') {
+                    steps {
+                        // En Mac usamos 'sh' y barras inclinadas /
+                        sh '''
+                            export PYTHONPATH=WORKSPACE
+                            python3 -m pytest --junitxml=result-unit.xml test/unit
+                        '''
+                        //Window
+                        //bat '''
+                        //    set PYTHONPATH=%WORKSPACE%
+                        //    pytest --junitxml=result-unit.xml test\\unit
+                        //'''
+                    }
+                }
+
+                stage('Rest') {
+                    steps {
+                        sh '''
+                            # --- MAC (ACTIVO) ---
+                            # 1. Limpiar puertos para asegurar una ejecución limpia
+                            kill -9 $(lsof -t -i:5000) || true
+                            kill -9 $(lsof -t -i:9090) || true
+
+                            # 2. Configurar y lanzar Flask (sin parámetros extra de host/port)
+                            export FLASK_APP=app/api.py
+                            export FLASK_ENV=development
+                            python3 -m flask run & 
+                            
+                            # 3. Lanzar WireMock (manteniendo el puerto 9090 para tus tests)
+                            java -jar "/Users/santt/Documents/UNIR/1_Curso Devops/CASOS PRACTICOS/REPOS/JAR/wiremock-standalone-4.0.0-beta.29.jar" --port 9090 --root-dir test/wiremock &
+                            
+                            # 4. Pausa para que los servicios arranquen
+                            sleep 5
+                            
+                            # 5. Ejecutar tests
+                            export PYTHONPATH=${WORKSPACE}
+                            python3 -m pytest --junitxml=result-rest.xml test/rest
+                        '''
+                        
+                        /* --- WINDOWS (COMENTADO) ---
+                        bat '''
+                            :: 1. Limpiar puertos
+                            for /f "tokens=5" %%a in ('netstat -aon ^| findstr :5000') do taskkill /f /pid %%a 2>nul
+                            for /f "tokens=5" %%a in ('netstat -aon ^| findstr :9090') do taskkill /f /pid %%a 2>nul
+
+                            :: 2. Configurar y lanzar Flask
+                            set FLASK_APP=app\\api.py
+                            set FLASK_ENV=development
+                            start /B flask run
+                            
+                            :: 3. Lanzar WireMock
+                            start /B java -jar "C:\\Ruta\\wiremock.jar" --port 9090 --root-dir test\\wiremock
+                            
+                            :: 4. Pausa y ejecución
+                            timeout /t 15
+                            set PYTHONPATH=%WORKSPACE%
+                            pytest --junitxml=result-rest.xml test\\rest
+                        '''
+                        */
+                    }
+                }
+            }
+        }
+
+
+
+        stage('Result') {
+            steps {
+                // Este comando es nativo de Jenkins, funciona igual en Mac y Windows
+                junit 'result*.xml' 
+                // Windows: (Igual que arriba) junit 'result*.xml'
+            }
+        }
+    
+    }
+}
