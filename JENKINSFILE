@@ -1,7 +1,6 @@
 pipeline {
     // Indica que el pipeline puede ejecutarse
     // en cualquier agente de Jenkins disponible
-    //TODO EL CODIGO ESTA REALIZADO PARA MAC
     agent any 
 
     stages {
@@ -23,8 +22,12 @@ pipeline {
                         sh '''
                             # Definimos la ruta del proyecto para que Python encuentre los módulos
                             export PYTHONPATH=${WORKSPACE} 
-                            # Ejecutamos pytest y guardamos el resultado en un XML
-                            python3 -m pytest --junitxml=result-unit.xml test/unit 
+                            # Ejecutamos la herramienta coverage, con --branch le digo que no solo mida las líneas si no tambien ramas 
+                            # --source=app solo me mido el código que está dentro de carpeta app
+                            # para omitir el --omit 
+                            # -m pytest le dice a coverage que ejecute pytest y --junitxml=result-unit.xml Guarda los resultados de los tests en un XML
+                            # test/unit ruta donde estan los test unitarios
+                            python3 -m coverage run --branch --source=app --omit=app/__init__.py,app/api.py -m pytest --junitxml=result-unit.xml test/unit
                         '''
                     }
                     post {
@@ -72,15 +75,11 @@ pipeline {
         // ETAPA 3: MEDICIÓN DE COBERTURA
         stage('Coverage'){
             steps {
-                // catchError permite que si la cobertura es baja, el pipeline siga pero marque aviso
-                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
-                    sh '''
-                        # Ejecutamos los tests midiendo qué líneas de código se tocan y cuáles no
-                        python3 -m coverage run --branch --source=app --omit=app/__init__.py,app/api.py -m pytest --junitxml=result-unit.xml test/unit
-                        # Generamos el reporte en formato XML para el plugin
-                        python3 -m coverage xml 
-                    '''
-                }
+                sh '''
+                    # Ahora NO ejecutamos pytest otra vez. Solo generamos el reporte desde los datos.
+                    python3 -m coverage xml 
+                '''
+                
                 
                 // Configuramos los umbrales de calidad (Quality Gates) para líneas y ramas
                 recordCoverage tools: [[parser: 'COBERTURA', pattern: 'coverage.xml']], 
