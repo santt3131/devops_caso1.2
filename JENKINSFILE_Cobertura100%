@@ -1,0 +1,153 @@
+pipeline {
+    // Indica que el pipeline puede ejecutarse
+    // en cualquier agente de Jenkins disponible
+    agent any 
+
+    stages {
+        // ETAPA 1: DESCARGA DEL PROYECTO
+        stage('Get Code') {
+            steps {
+                git branch: 'feature_fix_coverage', url: 'https://github.com/santt3131/devops_caso1.2.git'
+            }
+        }
+
+        // ETAPA 2: EJECUCIÓN DE PRUEBAS UNITARIAS E INTEGRACIÓN (En paralelo para ganar velocidad)
+        stage('Test'){
+            parallel{
+                // Sub-etapa: Pruebas Unitarias
+                stage('Unit') {
+                    steps {
+                        sh '''
+                            # Definimos la ruta del proyecto para que Python encuentre los módulos
+                            export PYTHONPATH=${WORKSPACE} 
+                            # Ejecutamos la herramienta coverage, con --branch le digo que no solo mida las líneas si no tambien ramas 
+                            # --source=app solo me mido el código que está dentro de carpeta app
+                            # para omitir el --omit 
+                            # -m pytest le dice a coverage que ejecute pytest y --junitxml=result-unit.xml Guarda los resultados de los tests en un XML
+                            # test/unit ruta donde estan los test unitarios
+                            python3 -m coverage run --branch --source=app --omit=app/__init__.py,app/api.py -m pytest --junitxml=result-unit.xml test/unit
+                        '''
+                    }
+                    post {
+                        always {
+                            // Le decimos a Jenkins que procese el XML para mostrar los gráficos de tests
+                            junit 'result-unit.xml' 
+                        }
+                    }
+                }
+
+                // Sub-etapa: Pruebas de Integración (API Rest)
+                stage('Rest') {
+                    steps {
+                        sh '''
+                            # Limpieza: Matamos procesos en puertos 5000 y 9090 para evitar el error "Address already in use"
+                            lsof -t -i:5000 | xargs kill -9 || true
+                            lsof -t -i:9090 | xargs kill -9 || true
+
+                            # Lanzamos la App Flask en segundo plano (&) para que el pipeline pueda seguir
+                            export FLASK_APP=app/api.py
+                            export FLASK_ENV=development
+                            python3 -m flask run & 
+                            
+                            # Lanzamos WireMock para simular dependencias externas, también en segundo plano
+                            java -jar "/Users/santt/Documents/UNIR/1_Curso Devops/CASOS PRACTICOS/REPOS/JAR/wiremock-standalone-4.0.0-beta.29.jar" --port 9090 --root-dir test/wiremock &
+                            
+                            # Esperamos 5 segundos para que Flask y WireMock estén totalmente listos
+                            sleep 5 
+                            
+                            export PYTHONPATH=${WORKSPACE}
+                            # Ejecutamos los tests de integración contra la API
+                            python3 -m pytest --junitxml=result-rest.xml test/rest 
+                        '''
+                    }
+                    post {
+                        always {
+                            // Procesamos los resultados de los tests Rest
+                            junit 'result-rest.xml'
+                        }
+                    }
+                }
+            }
+        }
+
+        // ETAPA 3: MEDICIÓN DE COBERTURA
+        stage('Coverage'){
+            steps {
+                sh '''
+                    # Ahora NO ejecutamos pytest otra vez. Solo generamos el reporte desde los datos.
+                    python3 -m coverage xml 
+                '''
+                
+                
+                // Configuramos los umbrales de calidad (Quality Gates) para líneas y ramas
+                recordCoverage tools: [[parser: 'COBERTURA', pattern: 'coverage.xml']], 
+                        qualityGates: [   
+                            [criticality: 'NOTE', integerThreshold: 95, metric: 'LINE', threshold: 95.0],
+                            [criticality: 'ERROR', integerThreshold: 85, metric: 'LINE', threshold: 85.0], 
+                            [criticality: 'NOTE', integerThreshold: 90, metric: 'BRANCH', threshold: 90.0],
+                            [criticality: 'ERROR', integerThreshold: 80, metric: 'BRANCH', threshold: 80.0]
+                        ]
+            }
+        }
+
+        // ETAPA 4: ANÁLISIS ESTÁTICO - FLAKE8
+        stage('Static') {
+            steps {
+                sh '''
+                    # Flake8 revisa que el código cumpla las reglas de PEP8 
+                    # --exit-zero evita basicamente nos dice : Avisame de los fallos, pero devuélveme 
+                    # un 'código 0' (que significa 'todo okay')
+                    # para que Jenkins pueda seguir con la siguiente etapa
+                    python3 -m flake8 --format=pylint --exit-zero app > flake8.out
+                '''
+                // Mostramos los problemas detectados en la interfaz de Jenkins
+                recordIssues tools: [flake8(name: 'Flake8', pattern: 'flake8.out')],
+                    qualityGates: [
+                        [threshold: 8, type: 'TOTAL', unstable: true], 
+                        [threshold: 10, type: 'TOTAL', unstable: false]
+                    ]
+            }
+        }
+
+        // ETAPA 5: ANÁLISIS DE SEGURIDAD - BANDIT
+        stage('Security') {
+            steps {
+                sh '''
+                    # Bandit busca agujeros de seguridad (vulnerabilidades) en el código Python
+                    python3 -m bandit --exit-zero -r . -f custom -o bandit.out --msg-template "{abspath}:{line}: [{test_id}] {msg}"
+                '''
+                // Registramos las vulnerabilidades como issues dentro de Jenkins
+                // Nos dice 0-1 fallos: Todo Verde (Aceptable).
+                // 2-3 fallos: Se pone Amarillo
+                // 4 o más fallos: Se pone Rojo
+                recordIssues tools: [pyLint(name: 'Bandit', pattern: 'bandit.out')],
+                    qualityGates: [
+                        [threshold: 2, type: 'TOTAL', unstable: true], 
+                        [threshold: 4, type: 'TOTAL', unstable: false]
+                    ]
+            }
+        }
+
+        // ETAPA 6: PRUEBAS DE RENDIMIENTO - JMETER
+        stage('Performance') {
+            steps {
+                script {
+                    sh '''
+                        export FLASK_APP=app/api.py
+                        export FLASK_ENV=development
+                        # Aseguramos que el PATH incluya donde está instalado JMeter en Mac (Homebrew)
+                        export PATH=$PATH:/usr/local/bin:/opt/homebrew/bin
+                        
+                        # Ejecutamos JMeter en modo consola (-n).
+                        # La primera es ruta para ejecutar jmeter, luego flask.jmx es la ruta donde esta el archivo trabajado
+                        # el flask.jtl es resultado de pruebas
+                        # -f fuerza la sobreescritura del archivo .jtl para que los datos sean 100% nuevos
+                        /opt/homebrew/bin/jmeter -n -t "test/jmeter/flask.jmx" -f -l flask.jtl
+                    '''
+                }
+                // El plugin de rendimiento lee el .jtl y genera las gráficas de respuesta y percentiles
+                perfReport sourceDataFiles: 'flask.jtl'
+            }
+        }
+    }
+}
